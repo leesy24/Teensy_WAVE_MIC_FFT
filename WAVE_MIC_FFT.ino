@@ -52,17 +52,25 @@ DMAChannel wave_dma(false);
 #define CAP_TIME_MAX 700 // unit is msec
 //#define CAP_TIME_MAX 300 // unit is msec
 
+#define CAP_TIME_DIV 4
+//#define CAP_TIME_DIV 2
+//#define CAP_TIME_DIV 1
+
 #define CAP_BLOCK_SIZE ((AUDIO_SAMPLE_RATE_KHZ * CAP_TIME_MAX / AUDIO_BLOCK_SAMPLES) + 1) // approx. 263
 
 #define WAVE_DURATION 1 // unit is msec
+//#define WAVE_DURATION 2 // unit is msec
 
-#define WAVE_INFO_CNT 4
+#define WAVE_INFO_CNT 7
 
 int wave_freq[WAVE_INFO_CNT] =
 {
   20000,
+  15000,
   10000,
   5000,
+  4000,
+  3000,
   2000
 };
 
@@ -70,7 +78,8 @@ typedef struct {
   int cnt;
   int size;
   int16_t *buf;
-  int gain;
+  int in_gain;
+  int out_vol;
 } wave_info_t;
 
 wave_info_t wave_data[WAVE_INFO_CNT];
@@ -80,8 +89,10 @@ volatile int wave_cnt = 0;
 volatile int wave_end = 0;
 int wave_cnt_max;
 
+int wave_sel = -1; // init for auto select
 //int wave_sel = 0;
-int wave_sel = 2;
+//int wave_sel = 2;
+//int wave_sel = 3;
 
 // Pin 13 has the LED on Teensy 3.1 - will use this pin also as the square wave TTL output
 //int ledpin = 13;
@@ -110,7 +121,7 @@ AudioControlSGTL5000     sgtl5000_1;     //xy=265,212
 //const int audio_input = AUDIO_INPUT_LINEIN;
 const int audio_input = AUDIO_INPUT_MIC;
 
-#define AUDIO_INPUT_GAIN_MAX 100
+#define AUDIO_INPUT_GAIN_MAX 65
 //int audio_input_gain_default = 0;
 int audio_input_gain_default = 35;
 //int audio_input_gain_default = 100;
@@ -196,7 +207,8 @@ void setup()
   {
     wave_data[i].cnt = wave_freq[i] / 1000 * WAVE_DURATION;
     wave_data[i].buf = make_sine_wave(wave_freq[i] / 1000, &wave_data[i].size);
-    wave_data[i].gain = audio_input_gain_default;
+    wave_data[i].in_gain = audio_input_gain_default;
+    wave_data[i].out_vol = 50;
   }
 
   pinMode(BUTTON_PIN, INPUT_PULLUP); // sets the digital pin as input
@@ -241,7 +253,7 @@ void setup()
   // Set mic gain
   //sgtl5000_1.micGain(70);
   //sgtl5000_1.micGain(40);
-  //sgtl5000_1.micGain(wave_data[wave_sel].gain);
+  //sgtl5000_1.micGain(wave_data[wave_sel].in_gain);
   //sgtl5000_1.micGain(0);
 
   //bufFFT.windowFunction(AudioWindowHanning1024);
@@ -261,7 +273,13 @@ FASTRUN void isr_button_push()
 void loop() {
   if (mode == 0) {
     //Serial.println("mode=0");
-    sgtl5000_1.micGain(wave_data[wave_sel].gain);
+    wave_sel ++;
+    if (wave_sel >= WAVE_INFO_CNT)
+    {
+      wave_sel = 0;
+    }
+
+    sgtl5000_1.micGain(wave_data[wave_sel].in_gain);
 
     wave_end = 0;
     wave_cnt = 0;
@@ -316,27 +334,25 @@ void loop() {
 
       if (level < 500)
       {
-          wave_data[wave_sel].gain += 5;
+          wave_data[wave_sel].in_gain += 5;
           if (500 - level > 250)
           {
-            wave_data[wave_sel].gain += 5;
+            wave_data[wave_sel].in_gain += 5;
           }
-          if (wave_data[wave_sel].gain >= AUDIO_INPUT_GAIN_MAX)
-            wave_data[wave_sel].gain = AUDIO_INPUT_GAIN_MAX;
-          sgtl5000_1.micGain(wave_data[wave_sel].gain);
+          if (wave_data[wave_sel].in_gain >= AUDIO_INPUT_GAIN_MAX)
+            wave_data[wave_sel].in_gain = AUDIO_INPUT_GAIN_MAX;
       }
       else if (level > 1000)
       {
-          wave_data[wave_sel].gain -= 5;
+          wave_data[wave_sel].in_gain -= 5;
           if (level - 1000 > 250)
           {
-            wave_data[wave_sel].gain -= 5;
+            wave_data[wave_sel].in_gain -= 5;
           }
-          if (wave_data[wave_sel].gain < 0)
-            wave_data[wave_sel].gain = 0;
-          sgtl5000_1.micGain(wave_data[wave_sel].gain);
+          if (wave_data[wave_sel].in_gain < 0)
+            wave_data[wave_sel].in_gain = 0;
       }
-      Serial.printf("\nlvl=%d,dis=%d,gain=%d\n\n", level, distance, wave_data[wave_sel].gain);
+      Serial.printf("\nlvl=%d,dis=%d,in_gain=%d\n\n", level, distance, wave_data[wave_sel].in_gain);
       delay(1000);
     }
   }
@@ -346,28 +362,40 @@ void loop() {
   }
 }
 
-#define CAP_TIME_DIV 4
-
 int check_capture_data()
 {
   int i;
+  uint16_t peak2peak[CAP_TIME_MAX];
   int16_t buffer[FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES];
   uint16_t amplitude[CAP_TIME_MAX * CAP_TIME_DIV];
-  int sample_index;
+  int min, max, avg;
 
-  /*
-  for(sample_index = 0; sample_index < (((FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES) < 500) ? (FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES) : 500) ; sample_index ++)
+  // Calculate peak to peak values
+  for (i = 0; i < CAP_TIME_MAX; i ++)
   {
-    //Serial.printf("%d 32767 %d -32768\n",sample_index , cap_buf[sample_index + 128]);
-    Serial.printf("32767 %d -32768\n", (cap_buf[sample_index * 2 + 128] + cap_buf[sample_index * 2 + 1 + 128]) / 2);
-    //Serial.printf("%d\n", cap_buf[sample_index]);
-  }
-  Serial.println();
-  delay(1000);
-  */
+    int pp_min, pp_max, pp_index;
 
+    pp_min = 32767;
+    pp_max = -32768;
+    for (pp_index = 0; pp_index < AUDIO_SAMPLE_RATE_KHZ; pp_index ++)
+    {
+      int16_t pp_data;
+      pp_data = cap_buf[i * AUDIO_SAMPLE_RATE_KHZ + pp_index];
+      if (pp_data < pp_min) pp_min = pp_data;
+      if (pp_data > pp_max) pp_max = pp_data;
+    }
+    peak2peak[i] = pp_max - pp_min;
+  }
+
+  // Calcurate FFT for 1msec/CAP_TIME_DIV of capture buffer
+  // And, Calcurate max min average of FFT amplitude 
+  //min = 65535;
+  //max = 0;
+  //avg = 0;
   for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
   {
+    int sample_index;
+
     for (sample_index = 0; sample_index < FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES / AUDIO_SAMPLE_RATE_KHZ; sample_index ++)
     {
       memcpy(buffer + sample_index * AUDIO_SAMPLE_RATE_KHZ, cap_buf + i * AUDIO_SAMPLE_RATE_KHZ / CAP_TIME_DIV, AUDIO_SAMPLE_RATE_KHZ * 2);
@@ -383,14 +411,18 @@ int check_capture_data()
     //n = bufFFT.read((wave_freq[wave_sel] - 500) / FFT_FRQ_ACC, (wave_freq[wave_sel] + 500)/ FFT_FRQ_ACC);
     n = bufFFT.read((double)(wave_freq[wave_sel] - 250) / FFT_FRQ_ACC, (double)(wave_freq[wave_sel] + 250) / FFT_FRQ_ACC);
     amplitude[i] = (int)(n * 1000);
+    //avg += amplitude[i];
+    //if (amplitude[i] < min) min = amplitude[i];
+    //if (amplitude[i] > max) max = amplitude[i];
   }
+  //avg = avg / CAP_TIME_MAX / CAP_TIME_DIV;
 
   // Calcurate max min average of FFT amplitude 
-  int min, max, avg;
-  min = 65536;
+  //  at early 3msec approx. 50 cm
+  min = 65535;
   max = 0;
   avg = 0;
-  for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
+  for (i = 0 ; i < (3 + 1) * CAP_TIME_DIV; i ++)
   {
     avg += amplitude[i];
     if (amplitude[i] < min) min = amplitude[i];
@@ -400,11 +432,48 @@ int check_capture_data()
 
   uint16_t high;
 
+  // Search first peak
+  high = 0;
+  for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
+  {
+    if (amplitude[i] > max / 2)
+    {
+      if (amplitude[i] <= high)
+      {
+        break;
+      }
+      high = amplitude[i];
+      msec_index_first = i;
+    }
+    else
+    {
+      if (high)
+      {
+        break;
+      }
+    }
+  }
+
+  // Calcurate max min average of FFT amplitude 
+  //  after skip 3msec approx. 50 cm
+  min = 65535;
+  max = 0;
+  avg = 0;
+  for (i = msec_index_first + (WAVE_DURATION + 3) * CAP_TIME_DIV; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
+  {
+    avg += amplitude[i];
+    if (amplitude[i] < min) min = amplitude[i];
+    if (amplitude[i] > max) max = amplitude[i];
+  }
+  avg = avg / CAP_TIME_MAX / CAP_TIME_DIV;
+
   // Calcurate peak count of FFT amplitude 
   int peaks;
   peaks = 0;
   high = 0;
-  for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
+  //  after skip 3msec approx. 50 cm
+  for (i = msec_index_first + (WAVE_DURATION + 3) * CAP_TIME_DIV; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
+  //for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
   {
     if (amplitude[i] > (max / 3))
     {
@@ -428,28 +497,6 @@ int check_capture_data()
     }
   }
 
-  // Search first peak
-  high = 0;
-  for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
-  {
-    if (amplitude[i] > avg * 2)
-    {
-      if (amplitude[i] <= high)
-      {
-        break;
-      }
-      high = amplitude[i];
-      msec_index_first = i;
-    }
-    else
-    {
-      if (high)
-      {
-        break;
-      }
-    }
-  }
-
   // Search highest amplitude after skip 3msec approx. 50 cm
   high = 0;
   for (i = msec_index_first + (WAVE_DURATION + 3) * CAP_TIME_DIV; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
@@ -461,7 +508,7 @@ int check_capture_data()
     }
   }
 
-  if ((max - min) > 500 && peaks < 20)
+  if ((max - min) > 500 && peaks < 30)
   {
     // SoS = 346.45 m/s @ 25`C, t = m*2/SoS, m = t*SoS/2
     distance = 346.45 * (msec_index_highest - msec_index_first) / 2 / CAP_TIME_DIV / 10; 
@@ -471,24 +518,180 @@ int check_capture_data()
     distance = 0;
   }
 
-  // Plotte
+#if 0
+  // Plotte some of capture data
+  int plot_size = FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES * 2;
+  for(i = 0; i < plot_size; i += plot_size / 500)
+  {
+    int j;
+    int cap_avg = 0;
+    for (j = 0; j < plot_size / 500; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / j;
+    Serial.printf("32767 %d -32768\n", cap_avg);
+    //Serial.printf("%d 32767 %d -32768\n",i , cap_buf[i + 128]);
+    //Serial.printf("32767 %d -32768\n", cap_buf[i * 2 + 128]);
+    //Serial.printf("32767 %d -32768\n", (cap_buf[i * 2 + 128] + cap_buf[i * 2 + 1 + 128]) / 2);
+    //Serial.printf("%d\n", cap_buf[i]);
+  }
+  Serial.println();
+  delay(1000);
+#endif
+
+#if 0
+  // Plotte some of capture data and peak to peak
+  int plot_size = FFT_BLOCK_CNT * AUDIO_BLOCK_SAMPLES * 20;
+  for(i = 0; i < plot_size; i += plot_size / 500)
+  {
+    int j;
+    int p2p_avg = 0;
+    int cap_avg = 0;
+
+    if (plot_size / 500 / AUDIO_SAMPLE_RATE_KHZ > 0)
+    {
+      for (j = 0; j < plot_size / 500 / AUDIO_SAMPLE_RATE_KHZ; j ++)
+      {
+        p2p_avg += peak2peak[i / AUDIO_SAMPLE_RATE_KHZ + j];
+      }
+      p2p_avg = p2p_avg / j;
+    }
+    else
+    {
+      p2p_avg = peak2peak[i / AUDIO_SAMPLE_RATE_KHZ];
+    }
+    p2p_avg -= 32768;
+
+    for (j = 0; j < plot_size / 500; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / j;
+
+    Serial.printf("32767 %d %d %d -32768\n", cap_avg, p2p_avg, wave_data[wave_sel].in_gain * 1000 - 32768);
+  }
+  Serial.println();
+  //delay(1000);
+#endif
+
+#if 0
+  // Plotte all of capture data
+  for (i = 0; i < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES ; i += (CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500))
+  {
+    int j;
+    int cap_avg = 0;
+    for (j = 0; j < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / (CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500);
+    Serial.printf("32767 %d -32768\n", cap_avg);
+  }
+  if (i < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES)
+  {
+    int j;
+    int cap_avg = 0;
+    for (j = 0; j < (CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES) - i; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / j;
+    Serial.printf("32767 %d -32768\n", cap_avg);
+  }
+  Serial.printf("\n");
+  delay(2000);
+#endif
+
+#if 0
+  // Plotte all of capture data and peak to peak
+  for (i = 0; i < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES ; i += (CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500))
+  {
+    int j;
+    int cap_avg = 0;
+    int p2p_avg = 0;
+    for (j = 0; j < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500 / AUDIO_SAMPLE_RATE_KHZ; j ++)
+    {
+      p2p_avg += peak2peak[i / AUDIO_SAMPLE_RATE_KHZ + j];
+    }
+    p2p_avg = p2p_avg / j;
+    for (j = 0; j < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES / 500; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / j;
+    Serial.printf("-32768 %d %d 32767\n", cap_avg, p2p_avg);
+  }
+  if (i < CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES)
+  {
+    int j;
+    int cap_avg = 0;
+    int p2p_avg = 0;
+    for (j = 0; j < ((CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES) - i) / AUDIO_SAMPLE_RATE_KHZ; j ++)
+    {
+      p2p_avg += peak2peak[i / AUDIO_SAMPLE_RATE_KHZ + j];
+    }
+    p2p_avg = p2p_avg / j;
+    for (j = 0; j < (CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES) - i; j ++)
+    {
+      cap_avg += cap_buf[i + j];
+    }
+    cap_avg = cap_avg / j;
+    Serial.printf("-32768 %d %d 32767\n", cap_avg, p2p_avg);
+  }
+  Serial.printf("\n");
+  delay(2000);
+#endif
+
+#if 0
+  // Plotte peak2peak
+  for (i = 0; i < CAP_TIME_MAX; i += (CAP_TIME_MAX / 500))
+  {
+    int j;
+    int pp_avg = 0;
+    for (j = 0; j < CAP_TIME_MAX / 500; j ++)
+    {
+      pp_avg += peak2peak[i + j];
+    }
+    pp_avg = pp_avg / (CAP_TIME_MAX / 500);
+    Serial.printf("0 %d %d %d\n", i, pp_avg, wave_data[wave_sel].in_gain);
+  }
+  if (i < CAP_TIME_MAX)
+  {
+    int j;
+    int cap_avg = 0;
+    int pp_avg = 0;
+    for (j = 0; j < CAP_TIME_MAX - i; j ++)
+    {
+      pp_avg += peak2peak[i + j];
+    }
+    pp_avg = pp_avg / j;
+    Serial.printf("0 %d %d %d\n", i, pp_avg, wave_data[wave_sel].in_gain);
+  }
+  Serial.printf("\n");
+  //delay(2000);
+#endif
+
+#if 1
+  // Plotte amplitude
   for (i = 0; i < CAP_TIME_MAX * CAP_TIME_DIV; i ++)
   {
     if (i >= 500)
     {
       break;
     }
-    if ((msec_index_first != 0 && i == msec_index_first)
+    if ((msec_index_first != 0 && i >= msec_index_first && i < msec_index_first + (WAVE_DURATION + 3) * CAP_TIME_DIV)
         ||
         (msec_index_highest != 0 && i == msec_index_highest))
     {
-      Serial.printf("%d %d %d %d %d\n", i, amplitude[i], avg, 0, 189);
+      Serial.printf("%d %d %d %d %d %d\n", i, amplitude[i], avg, 0, distance, wave_data[wave_sel].in_gain * 10);
     }
     else
     {
-      Serial.printf("%d %d %d %d %d\n", i, amplitude[i], avg, distance, 189);
+      Serial.printf("%d %d %d %d %d %d\n", i, amplitude[i], avg, 189, distance, wave_data[wave_sel].in_gain * 10);
     }
   }
+#endif
 
   Serial.printf("\nmin=%d,max=%d,avg=%d,peaks=%d,i_f=%d,i_h=%d,dis=%d\n\n", min, max, avg, peaks, msec_index_first, msec_index_highest, distance);
 
