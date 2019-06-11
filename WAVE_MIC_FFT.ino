@@ -2,21 +2,30 @@
 #include <Audio.h>
 #include "memcpy16.h"
 
+// unit is meter per second
 #define SPEED_OF_SOUND_25 (346.45)
 
-//#define TARGER_CENTI_METER (189)
-#define TARGER_CENTI_METER (800)
+// t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
+#define CONV_RT_MSEC_2_DIST_CM(rt_msec) ((double)SPEED_OF_SOUND_25 * (double)(rt_msec) / 2. / 10.)
+#define CONV_RT_MSEC_2_INDEX(rt_msec) (int)((double)(rt_msec) * (double)WAVE_FFT_AMPLITUDE_RESOLUTION)
+#define CONV_DIST_CM_2_RT_MSEC(dist_cm) ((double)(dist_cm) * 10. * 2. / (double)SPEED_OF_SOUND_25)
+#define CONV_DIST_CM_2_INDEX(dist_cm) (int)((double)(dist_cm) * 10. * 2. * (double)WAVE_FFT_AMPLITUDE_RESOLUTION / (double)SPEED_OF_SOUND_25)
+#define CONV_INDEX_2_RT_MSEC(index) ((double)(index) / (double)WAVE_FFT_AMPLITUDE_RESOLUTION)
+#define CONV_INDEX_2_DIST_CM(index) ((double)SPEED_OF_SOUND_25 * (double)(index) / (double)WAVE_FFT_AMPLITUDE_RESOLUTION / 2. / 10.)
+
+//#define TARGET_DIST_CM (188)
+//#define TARGET_DIST_CM (800)
+#define TARGET_DIST_CM (817)
+
+//#define DEAD_ZONE_CMETER (50) // approx.3msec
+//#define DEAD_ZONE_CMETER (100) // approx. 6msec
+#define DEAD_ZONE_CMETER (150) // approx. 6msec
 
 #define WAVE_AUTO_SELECT
 //#define WAVE_COMBINED_USE
 
 // AUDIO_SAMPLE_RATE_EXACT
 #define AUDIO_SAMPLE_RATE_KHZ (int)(AUDIO_SAMPLE_RATE_EXACT / 1000)
-
-#define PDB_CONFIG     (PDB_SC_TRGSEL(15) | PDB_SC_PDBEN | PDB_SC_PDBIE | PDB_SC_CONT | PDB_SC_DMAEN)
-
-// DMA for wave out to DAC
-DMAChannel wave_dma(false);
 
 #define USE_FFT1024
 //#define USE_FFT256
@@ -26,15 +35,14 @@ DMAChannel wave_dma(false);
   BufferAnalyzeFFT1024     bufFFT;
   #define FFT_BLOCK_CNT 8
   #define FFT_READ_MAX 512
-  #define FFT_FRQ_ACC (AUDIO_SAMPLE_RATE_EXACT / 1024.)
+  #define FFT_FREQ_ACC (AUDIO_SAMPLE_RATE_EXACT / 1024.)
 #elif defined(USE_FFT256)
   #include "buf_analyze_fft256.h"
   BufferAnalyzeFFT256     bufFFT;
   #define FFT_BLOCK_CNT 2
   #define FFT_READ_MAX 128
-  #define FFT_FRQ_ACC (AUDIO_SAMPLE_RATE_EXACT / 256.)
+  #define FFT_FREQ_ACC (AUDIO_SAMPLE_RATE_EXACT / 256.)
 #endif
-
 
 #if defined(__MK20DX256__)  // Teensy 3.2
   #define BUTTON_PIN 8
@@ -63,14 +71,14 @@ DMAChannel wave_dma(false);
 
 #define CAP_BLOCK_SIZE ((AUDIO_SAMPLE_RATE_KHZ * CAP_TIME_MAX / AUDIO_BLOCK_SAMPLES) + 1) // approx. 263
 
-//#define WAVE_FFT_LEVEL_MAX 600
-//#define WAVE_FFT_LEVEL_MIN 300
+//#define WAVE_FFT_AMPLITUDE_MAX 600
+//#define WAVE_FFT_AMPLITUDE_MIN 300
 
-//#define WAVE_FFT_LEVEL_MAX 400
-//#define WAVE_FFT_LEVEL_MIN 150
+//#define WAVE_FFT_AMPLITUDE_MAX 400
+//#define WAVE_FFT_AMPLITUDE_MIN 150
 
-#define WAVE_FFT_LEVEL_MAX 300
-#define WAVE_FFT_LEVEL_MIN 100
+#define WAVE_FFT_AMPLITUDE_MAX 300
+#define WAVE_FFT_AMPLITUDE_MIN 100
 
 //#define WAVE_FFT_PEAKS_MAX 50
 #define WAVE_FFT_PEAKS_MAX 1000
@@ -82,10 +90,12 @@ DMAChannel wave_dma(false);
 #define WAVE_OUT_VOL_MIN 5
 
 //#define WAVE_IN_GAIN_DEFAULT 0;
-#define WAVE_IN_GAIN_DEFAULT 35;
+//#define WAVE_IN_GAIN_DEFAULT WAVE_IN_GAIN_MIN;
+#define WAVE_IN_GAIN_DEFAULT WAVE_IN_GAIN_MAX;
 //#define WAVE_IN_GAIN_DEFAULT 100;
 
-#define WAVE_OUT_VOL_DEFAULT 50;
+//#define WAVE_OUT_VOL_DEFAULT WAVE_OUT_VOL_MIN;
+#define WAVE_OUT_VOL_DEFAULT WAVE_OUT_VOL_MAX;
 
 #define WAVE_DURATION 1 // unit is msec
 //#define WAVE_DURATION 2 // unit is msec
@@ -114,38 +124,39 @@ volatile int wave_cnt = 0;
 volatile int wave_end = 0;
 int wave_cnt_max;
 
-/*
-#define WAVE_INFO_CNT 2
-
-int wave_freq[WAVE_INFO_CNT] =
-{
-  5000,
-  2000,
-};
-*/
 /**/
-#define WAVE_INFO_CNT 4
+#define WAVE_INFO_CNT 3
 
 int wave_freq[WAVE_INFO_CNT] =
 {
-  20000,
+  15000,
   10000,
   5000,
-  2000,
 };
 /**/
 /*
-#define WAVE_INFO_CNT 7
+#define WAVE_INFO_CNT 5
 
 int wave_freq[WAVE_INFO_CNT] =
 {
+  12000,
+  10000,
+  8000,
+  6000,
+  4000,
+};
+*/
+/*
+// Hawk spec.
+#define WAVE_INFO_CNT 5
+
+int wave_freq[WAVE_INFO_CNT] =
+{
+  30000,
   20000,
   15000,
   10000,
   5000,
-  4000,
-  3000,
-  2000
 };
 */
 
@@ -200,15 +211,20 @@ int16_t cap_buf[CAP_BLOCK_SIZE * AUDIO_BLOCK_SAMPLES];
 #if defined(WAVE_COMBINED_USE)
   int distance[WAVE_INFO_CNT] = {0}; // unit is centi-meter
   int wave_fft_first_i[WAVE_INFO_CNT] = {0};
-  int wave_fft_higtest_i[WAVE_INFO_CNT] = {0};
+  int wave_fft_highest_i[WAVE_INFO_CNT] = {0};
 #else
   int distance = 0; // unit is centi-meter
   int wave_fft_first_i = 0;
-  int wave_fft_higtest_i = 0;
+  int wave_fft_highest_i = 0;
 #endif
 
 // Remember which mode we're doing
 int mode = 0;  // 0=stopped, 1=recording
+
+#define PDB_CONFIG     (PDB_SC_TRGSEL(15) | PDB_SC_PDBEN | PDB_SC_PDBIE | PDB_SC_CONT | PDB_SC_DMAEN)
+
+// DMA for wave out to DAC
+DMAChannel wave_dma(false);
 
 // Setup DAC0
 void dac_setup()
@@ -457,13 +473,13 @@ void loop() {
 #if defined(WAVE_COMBINED_USE)
       int wave_index;
 
-      if (level_max < WAVE_FFT_LEVEL_MIN)
+      if (level_max < WAVE_FFT_AMPLITUDE_MIN)
       {
-          if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 2)
+          if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN / 2)
           {
             wave_data[wave_sel].in_gain += 10;
           }
-          else if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 10)
+          else if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN / 10)
           {
             wave_data[wave_sel].in_gain += 5;
           }
@@ -474,13 +490,13 @@ void loop() {
           if (wave_data[wave_sel].in_gain > WAVE_IN_GAIN_MAX)
             wave_data[wave_sel].in_gain = WAVE_IN_GAIN_MAX;
       }
-      else if (level_max > WAVE_FFT_LEVEL_MAX)
+      else if (level_max > WAVE_FFT_AMPLITUDE_MAX)
       {
-          if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 2)
+          if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN / 2)
           {
             wave_data[wave_sel].in_gain -= 10;
           }
-          else if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 10)
+          else if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN / 10)
           {
             wave_data[wave_sel].in_gain -= 5;
           }
@@ -501,23 +517,23 @@ void loop() {
         {
           Serial.printf("wave_data[%d].level=%d\n", wave_index, wave_data[wave_index].level);
           out_vol_adjust[wave_index] = 0;
-          if (wave_data[wave_index].level < WAVE_FFT_LEVEL_MIN)
+          if (wave_data[wave_index].level < WAVE_FFT_AMPLITUDE_MIN)
           {
             out_vol_adjust_flag = 1;
             out_vol_adjust_sum += 5;
             out_vol_adjust[wave_index] = 5;
-            if (WAVE_FFT_LEVEL_MIN - wave_data[wave_index].level > WAVE_FFT_LEVEL_MIN / 2)
+            if (WAVE_FFT_AMPLITUDE_MIN - wave_data[wave_index].level > WAVE_FFT_AMPLITUDE_MIN / 2)
             {
               out_vol_adjust_sum += 5;
               out_vol_adjust[wave_index] += 5;
             }
           }
-          else if (wave_data[wave_index].level > WAVE_FFT_LEVEL_MAX)
+          else if (wave_data[wave_index].level > WAVE_FFT_AMPLITUDE_MAX)
           {
             out_vol_adjust_flag = 1;
             out_vol_adjust_sum -= 5;
             out_vol_adjust[wave_index] = -5;
-            if (wave_data[wave_index].level - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 2)
+            if (wave_data[wave_index].level - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN / 2)
             {
               out_vol_adjust_sum -= 5;
               out_vol_adjust[wave_index] -= 5;
@@ -575,32 +591,23 @@ void loop() {
         }
       }
 #else // defined(WAVE_COMBINED_USE)
-      if (level_max < WAVE_FFT_LEVEL_MIN)
+      if (level_max < WAVE_FFT_AMPLITUDE_MIN)
       {
-        if (wave_data[wave_sel].out_vol == WAVE_OUT_VOL_MAX)
+        if (wave_data[wave_sel].out_vol != WAVE_OUT_VOL_MAX)
         {
-          if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 2)
+          if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 90 / 100)
           {
-            wave_data[wave_sel].in_gain += 10;
+            wave_data[wave_sel].out_vol += 50;
           }
-          else if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 10)
+          else if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 50 / 100)
           {
-            wave_data[wave_sel].in_gain += 5;
+            wave_data[wave_sel].out_vol += 20;
           }
-          else
-          {
-            wave_data[wave_sel].in_gain += 3;
-          }
-          if (wave_data[wave_sel].in_gain > WAVE_IN_GAIN_MAX)
-            wave_data[wave_sel].in_gain = WAVE_IN_GAIN_MAX;
-        }
-        else
-        {
-          if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 2)
+          else if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 25 / 100)
           {
             wave_data[wave_sel].out_vol += 10;
           }
-          else if (WAVE_FFT_LEVEL_MIN - level_max > WAVE_FFT_LEVEL_MIN / 10)
+          else if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 10 / 100)
           {
             wave_data[wave_sel].out_vol += 5;
           }
@@ -611,16 +618,33 @@ void loop() {
           if (wave_data[wave_sel].out_vol > WAVE_OUT_VOL_MAX)
             wave_data[wave_sel].out_vol = WAVE_OUT_VOL_MAX;
         }
-      }
-      else if (level_max > WAVE_FFT_LEVEL_MAX)
-      {
-        if (wave_data[wave_sel].out_vol == WAVE_OUT_VOL_MIN)
+        else
         {
-          if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 2)
+          if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 50 / 100)
+          {
+            wave_data[wave_sel].in_gain += 10;
+          }
+          else if (WAVE_FFT_AMPLITUDE_MIN - level_max > WAVE_FFT_AMPLITUDE_MIN * 10 / 100)
+          {
+            wave_data[wave_sel].in_gain += 5;
+          }
+          else
+          {
+            wave_data[wave_sel].in_gain += 3;
+          }
+          if (wave_data[wave_sel].in_gain > WAVE_IN_GAIN_MAX)
+            wave_data[wave_sel].in_gain = WAVE_IN_GAIN_MAX;
+        }
+      }
+      else if (level_max > WAVE_FFT_AMPLITUDE_MAX)
+      {
+        if (wave_data[wave_sel].in_gain != WAVE_IN_GAIN_MIN)
+        {
+          if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 50 / 100)
           {
             wave_data[wave_sel].in_gain -= 10;
           }
-          else if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 10)
+          else if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 10 / 100)
           {
             wave_data[wave_sel].in_gain -= 5;
           }
@@ -633,11 +657,19 @@ void loop() {
         }
         else
         {
-          if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 2)
+          if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 90 / 100)
+          {
+            wave_data[wave_sel].out_vol -= 50;
+          }
+          else if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 50 / 100)
+          {
+            wave_data[wave_sel].out_vol -= 20;
+          }
+          else if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 25 / 100)
           {
             wave_data[wave_sel].out_vol -= 10;
           }
-          else if (level_max - WAVE_FFT_LEVEL_MAX > WAVE_FFT_LEVEL_MIN / 10)
+          else if (level_max - WAVE_FFT_AMPLITUDE_MAX > WAVE_FFT_AMPLITUDE_MIN * 10 / 100)
           {
             wave_data[wave_sel].out_vol -= 5;
           }
@@ -671,6 +703,168 @@ void loop() {
   }
 }
 
+void fft_read_amplitude(int freq, int range, uint16_t *amplitude)
+{
+  double a;
+  if (range * 2 < (int)FFT_FREQ_ACC)
+    a = bufFFT.read((double)(freq) / FFT_FREQ_ACC);
+  else
+    a = bufFFT.read((double)(freq - range) / FFT_FREQ_ACC, (double)(freq + range) / FFT_FREQ_ACC);
+  *amplitude = (uint16_t)(a * 1000.);
+}
+
+int amplitude_search_highest_index(uint16_t *amplitude, int start, int end)
+{
+  int i;
+  int highest;
+  int highest_i;
+
+  highest = 0;
+  highest_i = 0;
+  for (i = start; i < end; i ++)
+  {
+    if (amplitude[i] > highest)
+    {
+      highest = amplitude[i];
+      highest_i = i;
+    }
+  }
+
+  return highest_i;
+}
+
+int amplitude_calc_min(uint16_t *amplitude, int start, int end)
+{
+  int i;
+  int min;
+
+  min = 65535;
+  for (i = start ; i < end; i ++)
+  {
+    if (amplitude[i] < min) min = amplitude[i];
+  }
+
+  return min;
+}
+
+int amplitude_calc_max(uint16_t *amplitude, int start, int end)
+{
+  int i;
+  int max;
+
+  max = 0;
+  for (i = start ; i < end; i ++)
+  {
+    if (amplitude[i] > max) max = amplitude[i];
+  }
+
+  return max;
+}
+
+int amplitude_search_peak_index(uint16_t *amplitude, int start, int end, int amplitude_min)
+{
+  int i;
+  int high, prev;
+  int high_i;
+
+  high = 0;
+  prev = 0;
+  high_i = 0;
+  for (i = start; i < end; i ++)
+  {
+    if (amplitude[i] > amplitude_min)
+    {
+      if (amplitude[i] < high && prev < high)
+      {
+        break;
+      }
+      if (amplitude[i] != high) prev = high;
+      high = amplitude[i];
+      high_i = i;
+    }
+    else
+    {
+      if (high)
+      {
+        break;
+      }
+    }
+  }
+
+  return high_i;
+}
+
+int amplitude_search_edge_index(uint16_t *amplitude, int start, int end, int amplitude_min)
+{
+  int i;
+
+  for (i = start; i < end; i ++)
+  {
+    if (amplitude[i] > amplitude_min)
+    {
+      return i;
+    }
+  }
+
+  return 0;
+}
+
+int amplitude_search_ravine_index(uint16_t *amplitude, int start, int end)
+{
+  int i;
+  int low, prev;
+  int low_i;
+
+  i = start;
+  prev = amplitude[i];
+  i ++;
+  low = amplitude[i];
+  low_i = i;
+  i ++;
+  for (; i < end; i ++)
+  {
+    //Serial.printf("amplitude_search_ravine_index:%d:prev=%d,low=%d,cur=%d\n", i, prev, low, amplitude[i]);
+    if (amplitude[i] > low && prev > low)
+    {
+      break;
+    }
+    if (amplitude[i] != low) prev = low;
+    low = amplitude[i];
+    low_i = i;
+  }
+
+  return low_i;
+}
+
+int amplitude_calc_peaks(uint16_t *amplitude, int start, int end, int amplitude_min)
+{
+  int i;
+  int high, prev;
+  int peaks;
+
+  peaks = 0;
+
+  i = start;
+  prev = amplitude[i];
+  i ++;
+  high = amplitude[i];
+  i ++;
+  for (; i < end; i ++)
+  {
+    if (amplitude[i] < high && prev < high)
+    {
+      if (amplitude[i] > amplitude_min)
+      {
+        peaks ++;
+      }
+    }
+    if (amplitude[i] != high) prev = high;
+    high = amplitude[i];
+  }
+
+  return peaks;
+}
+
 int check_capture_data()
 {
   int i;
@@ -678,16 +872,18 @@ int check_capture_data()
   uint16_t peak2peak[WAVE_PEAK_2_PEAK_SIZE];
 #if defined(WAVE_COMBINED_USE)
   uint16_t amplitude[WAVE_INFO_CNT][WAVE_FFT_AMPLITUDE_SIZE];
-  int min[WAVE_INFO_CNT], max[WAVE_INFO_CNT], avg[WAVE_INFO_CNT];
-  uint16_t high[WAVE_INFO_CNT];
+  int max1[WAVE_INFO_CNT];
+  int max2[WAVE_INFO_CNT];
   int peaks[WAVE_INFO_CNT];
+  int first_highest_i[WAVE_INFO_CNT];
+  int first_ravine_i[WAVE_INFO_CNT];
   int wave_index;
 #else
   uint16_t amplitude[WAVE_FFT_AMPLITUDE_SIZE];
-  int min, max, avg;
-  uint16_t high, low, prev;
+  int max1, max2;
   int peaks;
-  int first_ravine_i = 0;
+  int first_highest_i;
+  int first_ravine_i;
 #endif
 
   // Calculate peak to peak values of capruted buffer
@@ -708,21 +904,6 @@ int check_capture_data()
   }
 
   // Calcurate FFT for 1msec/WAVE_FFT_AMPLITUDE_RESOLUTION of capture buffer
-  // And, Calcurate max min average of FFT amplitude 
-#if defined(WAVE_COMBINED_USE)
-  /*
-  for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
-  {
-    min[wave_index] = 65535;
-    max[wave_index] = 0;
-    avg[wave_index] = 0;
-  }
-  */
-#else
-  //min = 65535;
-  //max = 0;
-  //avg = 0;
-#endif
   for (i = 0; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
   {
     int sample_index;
@@ -737,136 +918,57 @@ int check_capture_data()
     // Start FFT from buffer
     bufFFT.update(buffer);
 
-    double n;
-
 #if defined(WAVE_COMBINED_USE)
     for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
     {
-      //n = bufFFT.read((wave_freq[wave_index] - 500) / FFT_FRQ_ACC, (wave_freq[wave_index] + 500)/ FFT_FRQ_ACC);
-      n = bufFFT.read((double)(wave_freq[wave_index] - 250.) / FFT_FRQ_ACC, (double)(wave_freq[wave_index] + 250.) / FFT_FRQ_ACC);
-      amplitude[wave_index][i] = (int)(n * 1000.);
-      //avg[wave_index] += amplitude[wave_index][i];
-      //if (amplitude[wave_index][i] < min[wave_index]) min[wave_index] = amplitude[wave_index][i];
-      //if (amplitude[wave_index][i] > max[wave_index]) max[wave_index] = amplitude[wave_index][i];
+      //fft_read_amplitude(wave_freq[wave_index], 250, amplitude[wave_index] + i);
+      fft_read_amplitude(wave_freq[wave_index], 0, amplitude[wave_index] + i);
     }
 #else
-    //n = bufFFT.read((wave_freq[wave_sel] - 500) / FFT_FRQ_ACC, (wave_freq[wave_sel] + 500)/ FFT_FRQ_ACC);
-    n = bufFFT.read((double)(wave_freq[wave_sel] - 250.) / FFT_FRQ_ACC, (double)(wave_freq[wave_sel] + 250.) / FFT_FRQ_ACC);
-    amplitude[i] = (int)(n * 1000.);
-    //avg += amplitude[i];
-    //if (amplitude[i] < min) min = amplitude[i];
-    //if (amplitude[i] > max) max = amplitude[i];
+    //fft_read_amplitude(wave_freq[wave_sel], 250, amplitude + i);
+    fft_read_amplitude(wave_freq[wave_sel], 0, amplitude + i);
 #endif
   }
-#if defined(WAVE_COMBINED_USE)
-  /*
-  for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
-  {
-    avg[wave_index] = avg[wave_index] / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
-  }
-  */
-#else
-  //avg = avg / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
-#endif
 
 #if defined(WAVE_COMBINED_USE)
-  // Calcurate max min average of FFT amplitude at early 3msec approx. 50 cm
   for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
   {
-    min[wave_index] = 65535;
-    max[wave_index] = 0;
-    avg[wave_index] = 0;
-    for (i = 0 ; i < (3 + 1) * WAVE_FFT_AMPLITUDE_RESOLUTION; i ++)
-    {
-      avg[wave_index] += amplitude[wave_index][i];
-      if (amplitude[wave_index][i] < min[wave_index]) min[wave_index] = amplitude[wave_index][i];
-      if (amplitude[wave_index][i] > max[wave_index]) max[wave_index] = amplitude[wave_index][i];
-    }
-    avg[wave_index] = avg[wave_index] / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
+    // Search highest index of FFT amplitude at early DEAD_ZONE_CMETER * 2
+    first_highest_i[wave_index] = amplitude_search_highest_index(amplitude[wave_index], 0, CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER * 2));
+
+    // Calcurate max of FFT amplitude at early highest point to DEAD_ZONE_CMETER
+    max1[wave_index] = amplitude_calc_max(amplitude[wave_index], 0, first_highest_i[wave_index] + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER));
 
     // Search first peak
-    high[wave_index] = 0;
-    for (i = 0; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-    {
-      if (amplitude[wave_index][i] > max[wave_index] / 2)
-      {
-        if (amplitude[wave_index][i] <= high[wave_index])
-        {
-          break;
-        }
-        high[wave_index] = amplitude[wave_index][i];
-        wave_fft_first_i[wave_index] = i;
-      }
-      else
-      {
-        if (high[wave_index])
-        {
-          break;
-        }
-      }
-    }
+    wave_fft_first_i[wave_index] = amplitude_search_peak_index(amplitude[wave_index], 0, first_highest_i[wave_index] + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), max1[wave_index] / 2);
 
-    // Calcurate max min average of FFT amplitude 
-    //  after skip 3msec approx. 50 cm
-    min[wave_index] = 65535;
-    max[wave_index] = 0;
-    avg[wave_index] = 0;
-    for (i = wave_fft_first_i[wave_index] + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
+    // Search first ravine after skip DEAD_ZONE_CMETER
+    first_ravine_i[wave_index] = amplitude_search_ravine_index(amplitude[wave_index], wave_fft_first_i[wave_index] + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), WAVE_FFT_AMPLITUDE_SIZE);
+    /*
+    if (first_ravine_i[wave_index] !=0 && first_ravine_i[wave_index] == wave_fft_first_i[wave_index] + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER) + 1)
     {
-      avg[wave_index] += amplitude[wave_index][i];
-      if (amplitude[wave_index][i] < min[wave_index]) min[wave_index] = amplitude[wave_index][i];
-      if (amplitude[wave_index][i] > max[wave_index]) max[wave_index] = amplitude[wave_index][i];
+      Serial.printf("[%d]:wave_fft_first_i=%d,first_ravine_i=%d\n", wave_index, wave_fft_first_i, first_ravine_i);
+      delay(30000);
     }
-    avg[wave_index] = avg[wave_index] / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
+    */
 
-    // Calcurate peak count of FFT amplitude 
-    peaks[wave_index] = 0;
-    high[wave_index] = 0;
-    //  after skip 3msec approx. 50 cm
-    for (i = wave_fft_first_i[wave_index] + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-    //for (i = 0; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-    {
-      if (amplitude[wave_index][i] > (max[wave_index] / 3))
-      {
-        if (amplitude[wave_index][i] <= high[wave_index])
-        {
-          peaks[wave_index] ++;
-          high[wave_index] = 0;
-        }
-        else
-        {
-          high[wave_index] = amplitude[wave_index][i];
-        }
-      }
-      else
-      {
-        if (high[wave_index])
-        {
-          peaks[wave_index] ++;
-          high[wave_index] = 0;
-        }
-      }
-    }
+    // Calcurate max of FFT amplitude after first ravine
+    max2[wave_index] = amplitude_calc_max(amplitude[wave_index], first_ravine_i[wave_index], WAVE_FFT_AMPLITUDE_SIZE);
 
-    // Search highest amplitude after skip 3msec approx. 50 cm
-    high[wave_index] = 0;
-    for (i = wave_fft_first_i[wave_index] + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-    {
-      if (amplitude[wave_index][i] > high[wave_index])
-      {
-        high[wave_index] = amplitude[wave_index][i];
-        wave_fft_higtest_i[wave_index] = i;
-      }
-    }
+    // Calcurate peak count of FFT amplitude after first ravine
+    peaks[wave_index] = amplitude_calc_peaks(amplitude[wave_index], first_ravine_i[wave_index], WAVE_FFT_AMPLITUDE_SIZE, max2[wave_index] / 3);
 
-    if ((max[wave_index] - min[wave_index]) >= WAVE_FFT_LEVEL_MIN
+    // Search highest amplitude after first ravine
+    wave_fft_highest_i[wave_index] = amplitude_search_highest_index(amplitude[wave_index], first_ravine_i[wave_index], WAVE_FFT_AMPLITUDE_SIZE);
+
+    if (max2[wave_index] >= WAVE_FFT_AMPLITUDE_MIN
         &&
-        (max[wave_index] - min[wave_index]) <= WAVE_FFT_LEVEL_MAX
+        max2[wave_index] <= WAVE_FFT_AMPLITUDE_MAX
         &&
         peaks[wave_index] <= WAVE_FFT_PEAKS_MAX)
     {
       // t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
-      distance[wave_index] = SPEED_OF_SOUND_25 * (wave_fft_higtest_i[wave_index] - wave_fft_first_i[wave_index]) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
+      distance[wave_index] = SPEED_OF_SOUND_25 * (wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index]) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
     }
     else
     {
@@ -874,128 +976,48 @@ int check_capture_data()
     }
   }
 #else // defined(WAVE_COMBINED_USE)
-  // Calcurate max min average of FFT amplitude at early 3msec approx. 50 cm
-  min = 65535;
-  max = 0;
-  avg = 0;
-  for (i = 0 ; i < (3 + 1) * WAVE_FFT_AMPLITUDE_RESOLUTION; i ++)
-  {
-    avg += amplitude[i];
-    if (amplitude[i] < min) min = amplitude[i];
-    if (amplitude[i] > max) max = amplitude[i];
-  }
-  avg = avg / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
+  // Search highest index of FFT amplitude at early DEAD_ZONE_CMETER * 2
+  first_highest_i = amplitude_search_highest_index(amplitude, 0, CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER * 2));
 
-  // Search first peak
-  high = 0;
-  prev = 0;
-  for (i = 0; i < (3 + 1) * WAVE_FFT_AMPLITUDE_RESOLUTION; i ++)
-  {
-    if (amplitude[i] > max / 2)
-    {
-      if (amplitude[i] < high && prev < high)
-      {
-        break;
-      }
-      if (amplitude[i] != high) prev = high;
-      high = amplitude[i];
-      wave_fft_first_i = i;
-    }
-    else
-    {
-      if (high)
-      {
-        break;
-      }
-    }
-  }
+  // Calcurate max of FFT amplitude at early highest point to DEAD_ZONE_CMETER
+  max1 = amplitude_calc_max(amplitude, 0, first_highest_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER));
 
-  // Search first ravine after skip 3msec approx. 50cm
-  i = wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION;
-  prev = amplitude[i];
-  i ++;
-  low = amplitude[i];
-  first_ravine_i = i;
-  i ++;
-  for (; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-  {
-    //Serial.printf("%d:prev=%d,low=%d,cur=%d\n", i, prev, low, amplitude[i]);
-    if (amplitude[i] > low && prev > low)
-    {
-      break;
-    }
-    if (amplitude[i] != low) prev = low;
-    low = amplitude[i];
-    first_ravine_i = i;
-  }
   /*
-  if (first_ravine_i !=0 && first_ravine_i == wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION + 1)
+  // Search first peak
+  wave_fft_first_i = amplitude_search_peak_index(amplitude, 0, first_highest_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), max1 / 3);
+  */
+  // Search first edge
+  wave_fft_first_i = amplitude_search_edge_index(amplitude, 0, first_highest_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), max1 / 2);
+
+  // Search first ravine after skip DEAD_ZONE_CMETER
+  first_ravine_i = amplitude_search_ravine_index(amplitude, wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), WAVE_FFT_AMPLITUDE_SIZE);
+  /*
+  if (first_ravine_i !=0 && first_ravine_i == wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER) + 1)
   {
     Serial.printf("wave_fft_first_i=%d,first_ravine_i=%d\n", wave_fft_first_i, first_ravine_i);
     delay(30000);
   }
   */
 
-  // Calcurate max min average of FFT amplitude after first ravine
-  min = 65535;
-  max = 0;
-  avg = 0;
-  for (i = first_ravine_i; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-  {
-    avg += amplitude[i];
-    if (amplitude[i] < min) min = amplitude[i];
-    if (amplitude[i] > max) max = amplitude[i];
-  }
-  avg = avg / CAP_TIME_MAX / WAVE_FFT_AMPLITUDE_RESOLUTION;
+  // Calcurate max of FFT amplitude after first ravine
+  max2 = amplitude_calc_max(amplitude, first_ravine_i, WAVE_FFT_AMPLITUDE_SIZE);
 
   // Calcurate peak count of FFT amplitude after first ravine
-  peaks = 0;
-  high = 0;
-  for (i = first_ravine_i; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-  //for (i = 0; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-  {
-    if (amplitude[i] > (max / 3))
-    {
-      if (amplitude[i] <= high)
-      {
-        peaks ++;
-        high = 0;
-      }
-      else
-      {
-        high = amplitude[i];
-      }
-    }
-    else
-    {
-      if (high)
-      {
-        peaks ++;
-        high = 0;
-      }
-    }
-  }
+  peaks = amplitude_calc_peaks(amplitude, first_ravine_i, WAVE_FFT_AMPLITUDE_SIZE, max2 / 3);
 
   // Search highest amplitude after first ravine
-  high = 0;
-  for (i = first_ravine_i; i < WAVE_FFT_AMPLITUDE_SIZE; i ++)
-  {
-    if (amplitude[i] > high)
-    {
-      high = amplitude[i];
-      wave_fft_higtest_i = i;
-    }
-  }
+  wave_fft_highest_i = amplitude_search_highest_index(amplitude, first_ravine_i, WAVE_FFT_AMPLITUDE_SIZE);
 
-  if ((max - min) >= WAVE_FFT_LEVEL_MIN
+  if (max2 >= WAVE_FFT_AMPLITUDE_MIN
       &&
-      (max - min) <= WAVE_FFT_LEVEL_MAX
+      max2 <= WAVE_FFT_AMPLITUDE_MAX
       &&
       peaks <= WAVE_FFT_PEAKS_MAX
       )
   {
     // t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
-    distance = SPEED_OF_SOUND_25 * (wave_fft_higtest_i - wave_fft_first_i) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
+    //distance = SPEED_OF_SOUND_25 * (wave_fft_highest_i - wave_fft_first_i) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
+    distance = CONV_INDEX_2_DIST_CM(wave_fft_highest_i - wave_fft_first_i);
   }
   else
   {
@@ -1169,15 +1191,15 @@ int check_capture_data()
         {
           break;
         }
-        if ((wave_fft_first_i[wave_index] != 0 && i >= wave_fft_first_i[wave_index] && i < wave_fft_first_i[wave_index] + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION)
+        if ((wave_fft_first_i[wave_index] != 0 && i >= wave_fft_first_i[wave_index] && i < wave_fft_first_i[wave_index] + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER))
             ||
-            (wave_fft_higtest_i[wave_index] != 0 && i == wave_fft_higtest_i[wave_index]))
+            (wave_fft_highest_i[wave_index] != 0 && i == wave_fft_highest_i[wave_index]))
         {
-          Serial.printf("%d %d %d %d %d %d\n", i, amplitude[wave_index][i], avg[wave_index], wave_data[wave_index].in_gain * 10, 0, distance[wave_index]);
+          Serial.printf("%d %d %d %d %d\n", i, amplitude[wave_index][i], wave_data[wave_index].in_gain * 10, 0, distance[wave_index]);
         }
         else
         {
-          Serial.printf("%d %d %d %d %d %d\n", i, amplitude[wave_index][i], avg[wave_index], wave_data[wave_index].in_gain * 10, TARGER_CENTI_METER, distance[wave_index]);
+          Serial.printf("%d %d %d %d %d\n", i, amplitude[wave_index][i], wave_data[wave_index].in_gain * 10, TARGET_DIST_CM, distance[wave_index]);
         }
       }
       //delay(2000);
@@ -1190,25 +1212,36 @@ int check_capture_data()
         break;
       }
 
-      if ((wave_fft_first_i != 0 && i >= wave_fft_first_i && i < wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION)
-          ||
-          (first_ravine_i != 0 && i == first_ravine_i)
-          ||
-          (wave_fft_higtest_i != 0 &&  i == wave_fft_higtest_i))
+      int p1, p2, p3;
+      p1 = max2 / 3;
+      p2 = TARGET_DIST_CM;
+      p3 = distance;
+      if (amplitude[i] > 600) amplitude[i] = 600;
+      if (wave_fft_first_i != 0 && i >= wave_fft_first_i && i < wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER))
       {
-        Serial.printf("%d %d %d %d %d %d %d %d %d\n", i, amplitude[i], peak2peak[i / WAVE_PEAK_2_PEAK_RESOLUTION] / 100, avg, wave_data[wave_sel].in_gain * 10, wave_data[wave_sel].out_vol * 10, wave_freq[wave_sel] / 100, 0, 0);
-        //Serial.printf("%d %d %d %d %d %d\n", amplitude[i], avg, wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, wave_freq[wave_sel] / 100, 0);
+        p1 = max1 / 2;
+        p2 = p3 = 0;
       }
-      else
+      if (first_ravine_i != 0 && i == first_ravine_i)
       {
-        Serial.printf("%d %d %d %d %d %d %d %d %d\n", i, amplitude[i], peak2peak[i / WAVE_PEAK_2_PEAK_RESOLUTION] / 100, avg, wave_data[wave_sel].in_gain * 10, wave_data[wave_sel].out_vol * 10, wave_freq[wave_sel] / 100, TARGER_CENTI_METER, distance);
-        //Serial.printf("%d %d %d %d %d %d %d\n", amplitude[i], avg, wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, wave_freq[wave_sel] / 100, TARGER_CENTI_METER);
+        p2 = 0;
       }
+      if (wave_fft_highest_i != 0 &&  i == wave_fft_highest_i)
+      {
+        p3 = 0;
+      }
+      if (wave_fft_first_i != 0 && i == wave_fft_first_i + CONV_DIST_CM_2_INDEX(TARGET_DIST_CM))
+      {
+        p2 = 0;
+      }
+      //Serial.printf("%d %d %d %d %d %d %d %d %d\n", i, amplitude[i], peak2peak[i / WAVE_PEAK_2_PEAK_RESOLUTION] / 100, wave_data[wave_sel].in_gain * 10, wave_data[wave_sel].out_vol * 10, wave_freq[wave_sel] / 100, max1 / 3, 0, 0);
+      Serial.printf("%d %d %d %d %d %d %d %d\n", i, amplitude[i], wave_data[wave_sel].in_gain * 10, wave_data[wave_sel].out_vol * 5, wave_freq[wave_sel] / 100, p1, p2, p3);
+      //Serial.printf("%d %d %d %d %d %d\n", amplitude[i], avg, wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, wave_freq[wave_sel] / 100, 0);
     }
     /*
-    if (first_ravine_i !=0 && first_ravine_i == wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION + 1)
+    if (first_ravine_i !=0 && first_ravine_i == wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER) + 1)
       delay(30000);
-    if (first_ravine_i !=0 && first_ravine_i > wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION + 10)
+    if (first_ravine_i !=0 && first_ravine_i > wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER) + 10)
       delay(10000);
     */
   #endif
@@ -1220,11 +1253,11 @@ int check_capture_data()
     Serial.printf("\n");
     for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
     {
-      Serial.printf("%d:frq=%d,out_vol=%d,min=%d,max=%d,avg=%d,peaks=%d,f_i=%d,h_i=%d,d_i=%d,dist=%d\n", wave_index, wave_freq[wave_index], wave_data[wave_index].out_vol, min[wave_index], max[wave_index], avg[wave_index], peaks[wave_index], wave_fft_first_i[wave_index], wave_fft_higtest_i[wave_index], wave_fft_higtest_i[wave_index] - wave_fft_first_i[wave_index], distance[wave_index]);
+      Serial.printf("%d:frq=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d,h_i=%d,d_i=%d,dist=%d\n", wave_index, wave_freq[wave_index], wave_data[wave_index].out_vol, max2[wave_index], peaks[wave_index], wave_fft_first_i[wave_index], wave_fft_highest_i[wave_index], wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index], distance[wave_index]);
     }
     Serial.printf("\n");
   #else
-    Serial.printf("\n%d:frq=%d,in_gain=%d,out_vol=%d,min=%d,max=%d,avg=%d,peaks=%d,f_i=%d(%d),r_i=%d,h_i=%d,d_i=%d,dist=%d\n\n", wave_sel, wave_freq[wave_sel], wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, min, max, avg, peaks, wave_fft_first_i, wave_fft_first_i + (WAVE_DURATION + 3) * WAVE_FFT_AMPLITUDE_RESOLUTION, first_ravine_i, wave_fft_higtest_i, wave_fft_higtest_i - wave_fft_first_i, distance);
+    Serial.printf("\n%d:frq=%d,in_gain=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d(%d),r_i=%d,h_i=%d,d_i=%d,dist=%d\n\n", wave_sel, wave_freq[wave_sel], wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, max2, peaks, wave_fft_first_i, wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), first_ravine_i, wave_fft_highest_i, wave_fft_highest_i - wave_fft_first_i, distance);
   #endif
 #endif
 
@@ -1232,13 +1265,13 @@ int check_capture_data()
   int maxmax = 0;
   for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
   {
-    wave_data[wave_index].level = max[wave_index];
-    if (max[wave_index] > maxmax) maxmax = max[wave_index];
+    wave_data[wave_index].level = max2[wave_index];
+    if (max2[wave_index] > maxmax) maxmax = max2[wave_index];
   }
   return maxmax;
 #else
-  wave_data[wave_sel].level = max;
-  return max;
+  wave_data[wave_sel].level = max2;
+  return max2;
 #endif
 }
 
@@ -1304,7 +1337,7 @@ FASTRUN void timer1_callback() {
 int16_t *make_sine_wave(int target_KHz, int *cnt)
 {
   int16_t *buf;
-  int16_t tmp[1000]; // max. = 1000 / target_KHz
+  int16_t tmp[1000]; // maximum = 1000 / target_KHz
   int i;
   double val;
 
