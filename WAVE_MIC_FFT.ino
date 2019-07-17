@@ -1,21 +1,25 @@
 #include <DMAChannel.h>
 #include <Audio.h>
 #include "memcpy16.h"
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 // unit is meter per second
-#define SPEED_OF_SOUND_25 (346.45)
+//#define SPEED_OF_SOUND_25 (346.45)
+// SoS = 331.3 + 0.606T m/s
+#define SPEED_OF_SOUND_T (331.3 + 0.606 * temperature)
 
 // t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
-#define CONV_RT_MSEC_2_DIST_CM(rt_msec) ((double)SPEED_OF_SOUND_25 * (double)(rt_msec) / 2. / 10.)
+#define CONV_RT_MSEC_2_DIST_CM(rt_msec) ((double)SPEED_OF_SOUND_T * (double)(rt_msec) / 2. / 10.)
 #define CONV_RT_MSEC_2_INDEX(rt_msec) (int)((double)(rt_msec) * (double)WAVE_FFT_AMPLITUDE_RESOLUTION)
-#define CONV_DIST_CM_2_RT_MSEC(dist_cm) ((double)(dist_cm) * 10. * 2. / (double)SPEED_OF_SOUND_25)
-#define CONV_DIST_CM_2_INDEX(dist_cm) (int)((double)(dist_cm) * 10. * 2. * (double)WAVE_FFT_AMPLITUDE_RESOLUTION / (double)SPEED_OF_SOUND_25)
+#define CONV_DIST_CM_2_RT_MSEC(dist_cm) ((double)(dist_cm) * 10. * 2. / (double)SPEED_OF_SOUND_T)
+#define CONV_DIST_CM_2_INDEX(dist_cm) (int)((double)(dist_cm) * 10. * 2. * (double)WAVE_FFT_AMPLITUDE_RESOLUTION / (double)SPEED_OF_SOUND_T)
 #define CONV_INDEX_2_RT_MSEC(index) ((double)(index) / (double)WAVE_FFT_AMPLITUDE_RESOLUTION)
-#define CONV_INDEX_2_DIST_CM(index) ((double)SPEED_OF_SOUND_25 * (double)(index) / (double)WAVE_FFT_AMPLITUDE_RESOLUTION / 2. / 10.)
+#define CONV_INDEX_2_DIST_CM(index) ((double)SPEED_OF_SOUND_T * (double)(index) / (double)WAVE_FFT_AMPLITUDE_RESOLUTION / 2. / 10.)
 
-//#define TARGET_DIST_CM (188)
+#define TARGET_DIST_CM (188)
 //#define TARGET_DIST_CM (800)
-#define TARGET_DIST_CM (817)
+//#define TARGET_DIST_CM (817)
 
 //#define DEAD_ZONE_CMETER (50) // approx.3msec
 //#define DEAD_ZONE_CMETER (100) // approx. 6msec
@@ -125,10 +129,11 @@ volatile int wave_end = 0;
 int wave_cnt_max;
 
 /**/
-#define WAVE_INFO_CNT 3
+#define WAVE_INFO_CNT 4
 
 int wave_freq[WAVE_INFO_CNT] =
 {
+  20000,
   15000,
   10000,
   5000,
@@ -225,6 +230,16 @@ int mode = 0;  // 0=stopped, 1=recording
 
 // DMA for wave out to DAC
 DMAChannel wave_dma(false);
+
+// Data wire is plugged into digital pin 2 on the Arduino
+#define ONE_WIRE_BUS 2
+
+// Setup a oneWire instance to communicate with any OneWire device
+OneWire oneWire(ONE_WIRE_BUS);  
+
+// Pass oneWire reference to DallasTemperature library
+DallasTemperature temperature_sensor(&oneWire);
+double temperature;
 
 // Setup DAC0
 void dac_setup()
@@ -329,9 +344,17 @@ void setup()
   dac_setup();
 
   /**/
+  temperature_sensor.begin();  // Start up the library
   while(1)
   {
-    Serial.println("wait...");
+    // Send the command to get temperatures
+    temperature_sensor.requestTemperatures(); 
+    temperature = temperature_sensor.getTempCByIndex(0);
+
+    //print the temperature in Celsius
+    Serial.printf("Temperature: %0.2f, SoS: %0.2f\n", temperature, SPEED_OF_SOUND_T);
+    //Serial.println("wait...");
+
     delay(1000);
   }
   /**/
@@ -377,10 +400,19 @@ void setup()
   //sgtl5000_1.micGain(0);
 
   //bufFFT.windowFunction(AudioWindowHanning1024);
+
+  temperature_sensor.begin();  // Start up the library
 }
 
 void loop() {
   if (mode == 0) {
+    // Send the command to get temperatures
+    temperature_sensor.requestTemperatures(); 
+    temperature = temperature_sensor.getTempCByIndex(0);
+
+    //print the temperature in Celsius
+    //Serial.printf("Temperature: %0.2f, SoS: %0.2f\n", temperature, SPEED_OF_SOUND_T);
+
     //Serial.println("mode=0");
     /*
     // Plott wave data buffer
@@ -968,7 +1000,7 @@ int check_capture_data()
         peaks[wave_index] <= WAVE_FFT_PEAKS_MAX)
     {
       // t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
-      distance[wave_index] = SPEED_OF_SOUND_25 * (wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index]) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
+      distance[wave_index] = CONV_INDEX_2_DIST_CM(wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index]);
     }
     else
     {
@@ -1016,7 +1048,7 @@ int check_capture_data()
       )
   {
     // t = m*2/SoS -> m = t*SoS/2, SoS = Speed_of_SOUND
-    //distance = SPEED_OF_SOUND_25 * (wave_fft_highest_i - wave_fft_first_i) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
+    //distance = SPEED_OF_SOUND_T * (wave_fft_highest_i - wave_fft_first_i) / 2 / WAVE_FFT_AMPLITUDE_RESOLUTION / 10; 
     distance = CONV_INDEX_2_DIST_CM(wave_fft_highest_i - wave_fft_first_i);
   }
   else
@@ -1253,11 +1285,12 @@ int check_capture_data()
     Serial.printf("\n");
     for (wave_index = 0; wave_index < WAVE_INFO_CNT; wave_index ++)
     {
-      Serial.printf("%d:frq=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d,h_i=%d,d_i=%d,dist=%d\n", wave_index, wave_freq[wave_index], wave_data[wave_index].out_vol, max2[wave_index], peaks[wave_index], wave_fft_first_i[wave_index], wave_fft_highest_i[wave_index], wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index], distance[wave_index]);
+      Serial.printf("%d:temp=%0.2f,frq=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d,h_i=%d,d_i=%d,dist=%d\n", wave_index, temperature, wave_freq[wave_index], wave_data[wave_index].out_vol, max2[wave_index], peaks[wave_index], wave_fft_first_i[wave_index], wave_fft_highest_i[wave_index], wave_fft_highest_i[wave_index] - wave_fft_first_i[wave_index], distance[wave_index]);
     }
     Serial.printf("\n");
   #else
-    Serial.printf("\n%d:frq=%d,in_gain=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d(%d),r_i=%d,h_i=%d,d_i=%d,dist=%d\n\n", wave_sel, wave_freq[wave_sel], wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, max2, peaks, wave_fft_first_i, wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), first_ravine_i, wave_fft_highest_i, wave_fft_highest_i - wave_fft_first_i, distance);
+    Serial.printf("\n%d:temp=%0.2f,frq=%d,in_gain=%d,out_vol=%d,max2=%d,peaks=%d,f_i=%d(%d),r_i=%d,h_i=%d,d_i=%d,dist=%d\n\n", wave_sel, temperature, wave_freq[wave_sel], wave_data[wave_sel].in_gain, wave_data[wave_sel].out_vol, max2, peaks, wave_fft_first_i, wave_fft_first_i + CONV_DIST_CM_2_INDEX(DEAD_ZONE_CMETER), first_ravine_i, wave_fft_highest_i, wave_fft_highest_i - wave_fft_first_i, distance);
+    //Serial.printf("Temperature: %0.2f, SoS: %0.2f\n", temperature, SPEED_OF_SOUND_T);
   #endif
 #endif
 
